@@ -1,7 +1,7 @@
 /* Letra a letra | service worker: funciona sin conexión y se actualiza solo.
    Solo borra sus propias cachés: en github.io varias apps comparten el mismo origen. */
 const PREFIX = 'letra-a-letra-es-';
-const VERSION = PREFIX + 'v3';
+const VERSION = PREFIX + 'v4';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './logo.png',
   './icons/icon-192.png', './icons/icon-512.png', './icons/icon-maskable-512.png', './icons/apple-touch-icon.png'];
 
