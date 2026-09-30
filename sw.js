@@ -1,7 +1,8 @@
 /* Letra a letra | service worker: funciona sin conexión y se actualiza solo.
    Solo borra sus propias cachés: en github.io varias apps comparten el mismo origen. */
 const PREFIX = 'letra-a-letra-es-';
-const VERSION = PREFIX + 'v4';
+const VERSION = PREFIX + 'v5';
+const AUDIO = 'letra-a-letra-audio-es'; /* los audios van aparte: no se borran al actualizar la app */
 const SHELL = ['./', './index.html', './manifest.webmanifest', './logo.png',
   './icons/icon-192.png', './icons/icon-512.png', './icons/icon-maskable-512.png', './icons/apple-touch-icon.png'];
 
@@ -38,6 +39,20 @@ self.addEventListener('fetch', e => {
     return;
   }
 
+  /* audios: el índice se pide primero a la red (por si hay audios nuevos);
+     los paquetes no cambian nunca de nombre, así que se sirven desde la copia guardada */
+  if (url.origin === self.location.origin && url.pathname.includes('/audio/')){
+    if (url.pathname.endsWith('/indice.json')){
+      e.respondWith(fetch(req).then(res => {
+        if (res.ok){ const copy = res.clone(); caches.open(AUDIO).then(c => c.put(url.pathname, copy)); res.clone().json().then(j => prune(url, j)).catch(() => {}); }
+        return res;
+      }).catch(() => caches.open(AUDIO).then(c => c.match(url.pathname))));
+      return;
+    }
+    e.respondWith(caches.open(AUDIO).then(c => c.match(req).then(hit => hit || fetch(req).then(res => { if (res.ok) c.put(req, res.clone()); return res; }))));
+    return;
+  }
+
   /* archivos propios: primero la copia guardada */
   /* el PDF de la cartilla no se guarda: siempre se descarga la versión actual */
   if (url.pathname.endsWith('.pdf')) return;
@@ -49,3 +64,10 @@ self.addEventListener('fetch', e => {
     })));
   }
 });
+
+/* borra los paquetes de audio antiguos que ya no aparecen en el índice */
+function prune(url, j){
+  const dir = url.pathname.replace(/indice\.json$/, '');
+  const keep = new Set((j.packs || []).map(p => dir + p)); keep.add(dir + 'indice.json');
+  caches.open(AUDIO).then(c => c.keys().then(ks => ks.forEach(r => { const p = new URL(r.url).pathname; if (p.startsWith(dir) && !keep.has(p)) c.delete(r); })));
+}

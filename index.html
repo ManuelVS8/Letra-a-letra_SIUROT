@@ -757,6 +757,99 @@ const HUNT_CONF = {p:['q','b','d'],b:['d','p','h'],d:['b','p','q'],m:['n','u','w
   s:['z','c'],z:['s','c'],e:['a','o','c'],a:['o','e','d'],o:['a','e','c'],i:['l','j','t'],v:['b','u','w'],j:['i','g','y'],g:['q','j','p'],h:['n','b','k'],
   ñ:['n','m'],y:['v','j','g'],x:['k','z'],k:['h','x'],w:['v','m','u'],r:['n','v','s']};
 
+/* ================== AUDIOS PREGRABADOS ==================
+   Muchos Chromebook no traen voces en español ni en árabe. La app usa audios ya grabados
+   (carpeta audio/, generada con generar_audios.pyw) y solo si falta alguno recurre a la voz del sistema.
+   Los audios van en paquetes: se descargan al necesitarlos y el service worker los guarda para usarlos sin conexión. */
+const AUD = {
+  base: './audio/', idx: null, packs: [], urls: new Map(), ready: null, pending: false, BASE_RATE: 0.8,
+  MISS: 'letraALetra_faltan',
+  key: t => String(t).normalize('NFC').replace(/\s+/g, ' ').trim().toLocaleLowerCase('es'),
+  load(){
+    if (this.ready) return this.ready;
+    this.pending = true;
+    return (this.ready = fetch(this.base + 'indice.json', {cache: 'no-cache'})
+      .then(r => r.ok ? r.json() : null)
+      .then(j => { if (j && j.c && j.packs){ this.idx = j; this.prefetch(); } return this.idx; })
+      .catch(() => null)
+      .finally(() => { this.pending = false; }));
+  },
+  on(){ return !!this.idx && S.settings.clips !== false; },
+  count(lang){ if (!this.idx) return 0; const p = lang + '|'; return Object.keys(this.idx.c).filter(k => k.startsWith(p)).length; },
+  has(k){ return this.on() && !!this.idx.c[k]; },
+  /* frases que se montan con dos audios: «¿Cómo empieza» + «papá» */
+  SPLIT: [
+    [/^(¿Con qué vocal empieza|¿Cómo empieza|¿Qué sílaba oyes en) (.+)\?$/, m => [m[1], m[2]]],
+    [/^(Forma la palabra:|Escribe la palabra:) (.+)$/, m => [m[1], m[2]]]
+  ],
+  parts(text, lang){
+    if (!this.on() || !text) return null;
+    const k = lang + '|' + this.key(text);
+    if (this.has(k)) return [k];
+    if (lang !== 'es') return null;
+    for (const [re, f] of this.SPLIT){
+      const m = String(text).trim().match(re);
+      if (m){ const ks = f(m).map(t => 'es|' + this.key(t)); if (ks.every(x => this.has(x))) return ks; }
+    }
+    return null;
+  },
+  pack(i){
+    if (!this.packs[i]) this.packs[i] = fetch(this.base + this.idx.packs[i])
+      .then(r => { if (!r.ok) throw new Error('paquete'); return r.arrayBuffer(); })
+      .catch(e => { this.packs[i] = null; throw e; });
+    return this.packs[i];
+  },
+  async url(k){
+    if (this.urls.has(k)) return this.urls.get(k);
+    const [p, o, n] = this.idx.c[k];
+    const buf = await this.pack(p);
+    const u = URL.createObjectURL(new Blob([buf.slice(o, o + n)], {type: 'audio/mpeg'}));
+    this.urls.set(k, u);
+    return u;
+  },
+  /* descarga en segundo plano el resto de paquetes, de uno en uno, para que luego funcione sin conexión */
+  prefetch(){
+    let i = 0;
+    const next = () => { if (!this.idx || i >= this.idx.packs.length) return; this.pack(i++).then(() => setTimeout(next, 800), () => setTimeout(next, 8000)); };
+    setTimeout(next, 5000);
+  },
+  /* reproduce una o varias piezas seguidas; devuelve false si no ha podido (entonces se usa la voz del sistema) */
+  async play(ks, rate, alive){
+    if (TTS.has) try { if (speechSynthesis.speaking || speechSynthesis.pending) speechSynthesis.cancel(); } catch(e){}
+    for (const k of ks){
+      let u;
+      try { u = await Promise.race([this.url(k), new Promise((_, rej) => setTimeout(() => rej(new Error('lento')), 9000))]); }
+      catch(e){ return false; }
+      if (!alive()) return true;
+      await new Promise(res => {
+        const au = new Audio(u);
+        au.preservesPitch = true;
+        au.playbackRate = Math.min(2, Math.max(.5, (rate || S.settings.rate) / this.BASE_RATE));
+        if (curAudio) curAudio.pause();
+        curAudio = au;
+        const t = setTimeout(() => fin(), 20000);
+        const fin = () => { clearTimeout(t); if (curAudio === au) curAudio = null; res(); };
+        au.onended = fin; au.onerror = fin; au.onpause = fin;
+        au.play().catch(fin);
+      });
+      if (!alive()) return true;
+    }
+    return true;
+  },
+  /* apunta las frases que no tienen audio, para poder generarlas después */
+  note(text, lang){
+    try {
+      const t = String(text).replace(/\s+/g, ' ').trim(); if (!t) return;
+      const list = JSON.parse(localStorage.getItem(this.MISS) || '[]');
+      if (list.includes(t) || list.length >= 500) return;
+      list.push(t); localStorage.setItem(this.MISS, JSON.stringify(list));
+    } catch(e){}
+  },
+  missing(){ try { return JSON.parse(localStorage.getItem(this.MISS) || '[]'); } catch(e){ return []; } },
+  clearMissing(){ try { localStorage.removeItem(this.MISS); } catch(e){} }
+};
+AUD.load();
+
 /* ================== VOZ (TTS) ================== */
 const TTS = {
   voice:null, seq:0, has: 'speechSynthesis' in window,
@@ -775,8 +868,20 @@ const TTS = {
   speak(text, o = {}){
     if (S.settings.muted){ if (!o.keep) this.seq++; return sleep(text ? Math.min(1400, 250 + text.length * 25) : 0); }
     if (!o.keep){ this.seq++; if (curAudio){ curAudio.pause(); curAudio = null; } }
+    const my = this.seq;
+    const go = () => {
+      if (this.seq !== my) return;
+      const lang = o.ar ? 'ar' : 'es', ks = AUD.parts(text, lang);
+      if (ks) return AUD.play(ks, o.ar ? S.settings.rate : o.rate, () => this.seq === my).then(ok => { if (!ok && this.seq === my) return this._tts(text, o); });
+      if (text && AUD.on()) AUD.note(text, lang);
+      return this._tts(text, o);
+    };
+    return AUD.pending ? Promise.race([AUD.ready, sleep(3000)]).then(go) : go();
+  },
+  /* voz del sistema (respaldo) */
+  _tts(text, o = {}){
     return new Promise(res => {
-      if (!this.has || !text){ res(); return; }
+      if (!this.has || !text || (o.ar && !o.voice)){ res(); return; }
       if (!this.voice) this.pick();
       const busy = speechSynthesis.speaking || speechSynthesis.pending;
       if (busy) try { speechSynthesis.cancel(); } catch(e){}
@@ -1882,10 +1987,23 @@ function tLetras(body){
   });
   $('#t-def').onclick = async () => { if (await askYesNo('Orden recomendado', 'Se volverá al orden inicial: vocales, p, l, m, t, s, n, d, f, r, rr, b, v, c, g…', 'Restablecer')){ S.settings.order = [...DEFAULT_ORDER]; resetCache(); save(); renderTeacher(); } };
 }
+/* tarjeta de los audios grabados en el panel del maestro */
+function audCard(){
+  const n = AUD.idx ? Object.keys(AUD.idx.c).length : 0, miss = AUD.missing().length;
+  return `<div class="card"><h3>🎧 Audios grabados</h3>
+    <p>${n ? `La app tiene ${n} audios grabados${AUD.count('ar') ? ' en español y en árabe' : ''}. Suenan igual en cualquier dispositivo, aunque no tenga voces instaladas. La voz del sistema solo se usa si falta algún audio.` : 'No se encuentran los audios (carpeta <b>audio</b> junto a la app). Mientras tanto se usa la voz del sistema.'}</p>
+    ${n ? `<label class="row" style="gap:10px;font-weight:700;color:var(--ink);margin-bottom:8px"><input type="checkbox" id="t-clips" style="width:26px;height:26px" ${S.settings.clips !== false ? 'checked' : ''}> Usar los audios grabados</label>` : ''}
+    ${miss ? `<p>Frases que han sonado sin audio: <b>${miss}</b>. Copia la lista, pégala en el archivo <b>faltan.txt</b> del generador y vuelve a generar los audios.</p><div class="row"><button class="btn small" id="t-miss">📋 Copiar lista</button><button class="btn small" id="t-missdel">🗑️ Vaciar lista</button></div>` : ''}</div>`;
+}
+function audBind(){
+  const c = $('#t-clips'); if (c) c.onchange = e => { S.settings.clips = e.target.checked; save(); toast(e.target.checked ? 'Se usan los audios grabados' : 'Se usa la voz del sistema'); };
+  const m = $('#t-miss'); if (m) m.onclick = async () => { try { await navigator.clipboard.writeText(AUD.missing().join('\n')); toast('Lista copiada'); } catch(e){ toast('No se ha podido copiar la lista'); } };
+  const d = $('#t-missdel'); if (d) d.onclick = async () => { if (await askYesNo('Vaciar la lista', '¿Borrar la lista de frases sin audio?', 'Vaciar', true)){ AUD.clearMissing(); renderTeacher(); } };
+}
 function tVoz(body){
   const es = TTS.pick();
-  body.innerHTML = `<div class="card"><h3>Voz en español</h3>
-    ${!TTS.has ? '<p>Este navegador no permite leer en voz alta.</p>' : es.length ? '' : '<p>Cargando voces… Si no aparece ninguna, instala una voz en español en el sistema.</p>'}
+  body.innerHTML = audCard() + `<div class="card"><h3>Voz del sistema en español</h3>
+    ${!TTS.has ? '<p>Este navegador no permite leer en voz alta.</p>' : es.length || AUD.on() ? '' : '<p>Cargando voces… Si no aparece ninguna, instala una voz en español en el sistema.</p>'}
     <div class="field"><label for="t-voice">Voz</label><select id="t-voice"><option value="">Automática (español de España)</option>${es.map(v => `<option value="${esc(v.voiceURI)}" ${v.voiceURI === S.settings.voice ? 'selected' : ''}>${esc(v.name)} (${esc(v.lang)})</option>`).join('')}</select></div>
     <div class="field"><label for="t-rate">Velocidad: <span id="t-rv">${S.settings.rate}</span></label><input type="range" id="t-rate" min="0.5" max="1.2" step="0.05" value="${S.settings.rate}"></div>
     <div class="row"><button class="btn small" id="t-test">🔊 Probar</button></div></div>
@@ -1894,9 +2012,10 @@ function tVoz(body){
     <div class="row" style="margin-bottom:10px"><button class="btn small primary" id="t-recall">⏺ Grabar todas seguidas</button></div>
     <div id="t-prows" style="display:grid;gap:8px"></div></div>
     <div class="card"><h3>Sonidos</h3><label class="row" style="gap:10px;font-weight:700;color:var(--ink)"><input type="checkbox" id="t-fx" style="width:26px;height:26px" ${S.settings.fx ? 'checked' : ''}> Efectos de acierto y error</label></div>`;
+  audBind();
   $('#t-voice').onchange = e => { S.settings.voice = e.target.value; save(); TTS.pick(); };
   $('#t-rate').oninput = e => { S.settings.rate = +e.target.value; $('#t-rv').textContent = S.settings.rate; save(); };
-  $('#t-test').onclick = async () => { if (S.settings.muted){ toast('El sonido está desactivado: actívalo con el botón 🔇'); return; } TTS.lastErr = ''; await TTS.speak('Mi mamá me mima. Papá pule el palo.'); if (TTS.lastErr && TTS.lastErr !== 'interrupted') toast('La voz ha dado un error: ' + TTS.lastErr + '. Prueba otra voz o reinicia el navegador.'); else if (!speechSynthesis.getVoices().length) toast('Este navegador no tiene voces instaladas'); };
+  $('#t-test').onclick = async () => { if (S.settings.muted){ toast('El sonido está desactivado: actívalo con el botón 🔇'); return; } TTS.lastErr = ''; await TTS.speak('Mi mamá me mima. Papá pule el palo.'); if (TTS.lastErr && TTS.lastErr !== 'interrupted') toast('La voz ha dado un error: ' + TTS.lastErr + '. Prueba otra voz o reinicia el navegador.'); else if (!AUD.on() && TTS.has && !speechSynthesis.getVoices().length) toast('Este navegador no tiene voces instaladas'); };
   $('#t-fx').onchange = e => { S.settings.fx = e.target.checked; save(); };
   const drawPron = () => {
     const l = LBYID[$('#t-pl').value], list = [...l.sil.flat(), ...(l.inv || [])];
