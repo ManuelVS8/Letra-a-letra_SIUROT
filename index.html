@@ -359,6 +359,8 @@ body.f-may{--ltt:uppercase}
     <div class="row center" style="margin-top:18px"><button class="btn small hidden" id="btn-install">📲 Instalar la app</button></div>
     <div class="row center" style="margin-top:28px" id="who-grid"></div>
     <div class="row center" style="margin-top:22px"><a class="btn small" style="text-decoration:none" href="cartilla-letra-a-letra.pdf" download data-pdf>🖨️ Cartilla para imprimir (PDF)</a></div>
+    <p class="snd-hint" style="text-align:center;color:var(--soft);font-size:.95rem;margin:14px auto 0;max-width:520px">¿No se oye la voz en este dispositivo? Activa los audios grabados en la configuración de sonido.</p>
+    <div class="row center" style="margin-top:8px"><button class="btn small" id="btn-snd-cfg">⚙️ Configuración de sonido</button></div>
   </div>
 </section>
 
@@ -770,20 +772,24 @@ const AUD = {
     this.pending = true;
     return (this.ready = fetch(this.base + 'indice.json', {cache: 'no-cache'})
       .then(r => r.ok ? r.json() : null)
-      .then(j => { if (j && j.c && j.packs){ this.idx = j; this.prefetch(); } return this.idx; })
+      .then(j => { if (j && j.c && j.packs) this.idx = j; return this.idx; })
       .catch(() => null)
       .finally(() => { this.pending = false; }));
   },
-  on(){ return !!this.idx && S.settings.clips !== false; },
+  on(){ return !!this.idx; },
+  /* por defecto suena la voz del sistema; los audios se usan si el maestro los activa
+     o, automáticamente, si el dispositivo no tiene voz en ese idioma */
+  use(lang){ if (!this.idx) return false; if (S.settings.clips === true) return true; return lang === 'ar' ? !TTS.arVoice : TTS.noVoice(); },
+  pf: false,
   count(lang){ if (!this.idx) return 0; const p = lang + '|'; return Object.keys(this.idx.c).filter(k => k.startsWith(p)).length; },
-  has(k){ return this.on() && !!this.idx.c[k]; },
+  has(k){ return !!this.idx && !!this.idx.c[k]; },
   /* frases que se montan con dos audios: «¿Cómo empieza» + «papá» */
   SPLIT: [
     [/^(¿Con qué vocal empieza|¿Cómo empieza|¿Qué sílaba oyes en) (.+)\?$/, m => [m[1], m[2]]],
     [/^(Forma la palabra:|Escribe la palabra:) (.+)$/, m => [m[1], m[2]]]
   ],
   parts(text, lang){
-    if (!this.on() || !text) return null;
+    if (!this.use(lang) || !text) return null;
     const k = lang + '|' + this.key(text);
     if (this.has(k)) return [k];
     if (lang !== 'es') return null;
@@ -815,6 +821,7 @@ const AUD = {
   },
   /* reproduce una o varias piezas seguidas; devuelve false si no ha podido (entonces se usa la voz del sistema) */
   async play(ks, rate, alive){
+    if (!this.pf){ this.pf = true; this.prefetch(); }
     if (TTS.has) try { if (speechSynthesis.speaking || speechSynthesis.pending) speechSynthesis.cancel(); } catch(e){}
     for (const k of ks){
       let u;
@@ -864,6 +871,7 @@ const TTS = {
   /* Android: cancel() es asíncrono y puede borrar la frase que se pide justo después;
      las voces cambian de objeto al recargarse; «es_ES» no es un código válido. Se tienen en cuenta aquí. */
   android: /android/i.test(navigator.userAgent), lastErr: '', _u: null,
+  noVoice(){ if (!this.has) return true; if (!this.voice) this.pick(); return !this.voice; },
   fresh(v){ if (!v) return null; return speechSynthesis.getVoices().find(x => x.voiceURI === v.voiceURI) || null; },
   speak(text, o = {}){
     if (S.settings.muted){ if (!o.keep) this.seq++; return sleep(text ? Math.min(1400, 250 + text.length * 25) : 0); }
@@ -873,7 +881,7 @@ const TTS = {
       if (this.seq !== my) return;
       const lang = o.ar ? 'ar' : 'es', ks = AUD.parts(text, lang);
       if (ks) return AUD.play(ks, o.ar ? S.settings.rate : o.rate, () => this.seq === my).then(ok => { if (!ok && this.seq === my) return this._tts(text, o); });
-      if (text && AUD.on()) AUD.note(text, lang);
+      if (text && AUD.use(lang)) AUD.note(text, lang);
       return this._tts(text, o);
     };
     return AUD.pending ? Promise.race([AUD.ready, sleep(3000)]).then(go) : go();
@@ -1991,19 +1999,35 @@ function tLetras(body){
 function audCard(){
   const n = AUD.idx ? Object.keys(AUD.idx.c).length : 0, miss = AUD.missing().length;
   return `<div class="card"><h3>🎧 Audios grabados</h3>
-    <p>${n ? `La app tiene ${n} audios grabados${AUD.count('ar') ? ' en español y en árabe' : ''}. Suenan igual en cualquier dispositivo, aunque no tenga voces instaladas. La voz del sistema solo se usa si falta algún audio.` : 'No se encuentran los audios (carpeta <b>audio</b> junto a la app). Mientras tanto se usa la voz del sistema.'}</p>
-    ${n ? `<label class="row" style="gap:10px;font-weight:700;color:var(--ink);margin-bottom:8px"><input type="checkbox" id="t-clips" style="width:26px;height:26px" ${S.settings.clips !== false ? 'checked' : ''}> Usar los audios grabados</label>` : ''}
+    <p>${n ? `La app tiene ${n} audios grabados${AUD.count('ar') ? ' en español y en árabe' : ''}. Por defecto suena la voz del sistema; si el dispositivo no tiene voz ${AUD.count('ar') ? 'en español o en árabe' : 'en español'}, la app usa estos audios automáticamente.` : 'No se encuentran los audios grabados. Se usa la voz del sistema.'}</p>
+    ${n ? `<p style="margin-top:0">En este dispositivo: ${TTS.noVoice() ? '❌ no hay voz en español del sistema' : '✅ hay voz en español del sistema'}.</p>
+    <label class="row" style="gap:10px;font-weight:700;color:var(--ink);margin-bottom:8px"><input type="checkbox" id="t-clips" style="width:26px;height:26px" ${S.settings.clips === true ? 'checked' : ''}> Usar siempre los audios grabados</label>` : ''}
     ${miss ? `<p>Frases que han sonado sin audio: <b>${miss}</b>. Copia la lista, pégala en el archivo <b>faltan.txt</b> del generador y vuelve a generar los audios.</p><div class="row"><button class="btn small" id="t-miss">📋 Copiar lista</button><button class="btn small" id="t-missdel">🗑️ Vaciar lista</button></div>` : ''}</div>`;
 }
 function audBind(){
-  const c = $('#t-clips'); if (c) c.onchange = e => { S.settings.clips = e.target.checked; save(); toast(e.target.checked ? 'Se usan los audios grabados' : 'Se usa la voz del sistema'); };
+  const c = $('#t-clips'); if (c) c.onchange = e => { S.settings.clips = e.target.checked; save(); toast(e.target.checked ? 'Se usan siempre los audios grabados' : 'Se usa la voz del sistema'); };
   const m = $('#t-miss'); if (m) m.onclick = async () => { try { await navigator.clipboard.writeText(AUD.missing().join('\n')); toast('Lista copiada'); } catch(e){ toast('No se ha podido copiar la lista'); } };
   const d = $('#t-missdel'); if (d) d.onclick = async () => { if (await askYesNo('Vaciar la lista', '¿Borrar la lista de frases sin audio?', 'Vaciar', true)){ AUD.clearMissing(); renderTeacher(); } };
 }
+/* configuración de sonido: se abre desde la portada, sin PIN */
+function soundCfg(){
+  const n = AUD.idx ? Object.keys(AUD.idx.c).length : 0;
+  return modal({title: '⚙️ Configuración de sonido', html: n
+    ? `<p style="margin-top:0">${TTS.noVoice() ? 'Este dispositivo <b>no tiene voz en español</b>: la app ya usa los audios grabados.' : 'Este dispositivo tiene voz en español. Si no se oye o suena mal, activa los audios grabados.'}</p>
+       <label style="display:flex;align-items:center;gap:10px;font-weight:700;color:var(--ink)"><input type="checkbox" id="sc-clips" style="width:26px;height:26px" ${S.settings.clips === true ? 'checked' : ''}> Usar siempre los audios grabados</label>
+       <div style="margin-top:12px"><button class="btn small" id="sc-test">🔊 Probar</button></div>`
+    : '<p style="margin-top:0">No se encuentran los audios grabados. Comprueba la conexión a internet y vuelve a abrir la app.</p>',
+    buttons: [{label: 'Cerrar', cls: 'primary', value: true}],
+    onMount: b => {
+      const c = b.querySelector('#sc-clips'); if (c) c.onchange = e => { S.settings.clips = e.target.checked; save(); toast(e.target.checked ? 'Se usan siempre los audios grabados' : 'Se usa la voz del sistema'); };
+      const t = b.querySelector('#sc-test'); if (t) t.onclick = () => { if (S.settings.muted){ toast('El sonido está desactivado: actívalo con el botón 🔇'); return; } FX.init(); TTS.speak('¡Hola! Vamos a leer.'); };
+    }});
+}
+$('#btn-snd-cfg').onclick = () => soundCfg();
 function tVoz(body){
   const es = TTS.pick();
   body.innerHTML = audCard() + `<div class="card"><h3>Voz del sistema en español</h3>
-    ${!TTS.has ? '<p>Este navegador no permite leer en voz alta.</p>' : es.length || AUD.on() ? '' : '<p>Cargando voces… Si no aparece ninguna, instala una voz en español en el sistema.</p>'}
+    ${!TTS.has ? '<p>Este navegador no permite leer en voz alta.</p>' : es.length ? '' : '<p>Cargando voces… Si no aparece ninguna, instala una voz en español en el sistema.</p>'}
     <div class="field"><label for="t-voice">Voz</label><select id="t-voice"><option value="">Automática (español de España)</option>${es.map(v => `<option value="${esc(v.voiceURI)}" ${v.voiceURI === S.settings.voice ? 'selected' : ''}>${esc(v.name)} (${esc(v.lang)})</option>`).join('')}</select></div>
     <div class="field"><label for="t-rate">Velocidad: <span id="t-rv">${S.settings.rate}</span></label><input type="range" id="t-rate" min="0.5" max="1.2" step="0.05" value="${S.settings.rate}"></div>
     <div class="row"><button class="btn small" id="t-test">🔊 Probar</button></div></div>
@@ -2015,7 +2039,7 @@ function tVoz(body){
   audBind();
   $('#t-voice').onchange = e => { S.settings.voice = e.target.value; save(); TTS.pick(); };
   $('#t-rate').oninput = e => { S.settings.rate = +e.target.value; $('#t-rv').textContent = S.settings.rate; save(); };
-  $('#t-test').onclick = async () => { if (S.settings.muted){ toast('El sonido está desactivado: actívalo con el botón 🔇'); return; } TTS.lastErr = ''; await TTS.speak('Mi mamá me mima. Papá pule el palo.'); if (TTS.lastErr && TTS.lastErr !== 'interrupted') toast('La voz ha dado un error: ' + TTS.lastErr + '. Prueba otra voz o reinicia el navegador.'); else if (!AUD.on() && TTS.has && !speechSynthesis.getVoices().length) toast('Este navegador no tiene voces instaladas'); };
+  $('#t-test').onclick = async () => { if (S.settings.muted){ toast('El sonido está desactivado: actívalo con el botón 🔇'); return; } TTS.lastErr = ''; await TTS.speak('Mi mamá me mima. Papá pule el palo.'); if (TTS.lastErr && TTS.lastErr !== 'interrupted') toast('La voz ha dado un error: ' + TTS.lastErr + '. Prueba otra voz o reinicia el navegador.'); else if (!AUD.use('es') && TTS.has && !speechSynthesis.getVoices().length) toast('Este navegador no tiene voces instaladas'); };
   $('#t-fx').onchange = e => { S.settings.fx = e.target.checked; save(); };
   const drawPron = () => {
     const l = LBYID[$('#t-pl').value], list = [...l.sil.flat(), ...(l.inv || [])];
